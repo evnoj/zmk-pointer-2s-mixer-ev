@@ -98,3 +98,20 @@ CONFIG_ZMK_POINTER_2S_MIXER=y
 ```
 
 The module is automatically enabled when `CONFIG_ZMK_POINTING=y` is set.
+
+## Shell commands
+
+```
+p2sm status                         # show current configuration
+p2sm sens pointer    get|set [v]    # global cursor sensitivity (v = coef * 1000)
+p2sm sens twist      get|set [v]    # global scroll sensitivity (v = coef * 1000)
+p2sm sens sensor1    get|set [v]    # per-sensor cursor gain, sensor 1 (v = gain * 1000)
+p2sm sens sensor2    get|set [v]    # per-sensor cursor gain, sensor 2 (v = gain * 1000)
+p2sm sma  on|off|window set <n>     # moving-average smoothing
+```
+
+Per-sensor gain scales one sensor's contribution to the **cursor** (scroll/twist is
+unaffected). It's for rebalancing two sensors that track a given ball with different
+effective gain — e.g. a steel ball one sensor reads "hot". Values persist to flash.
+Boot defaults: `CONFIG_POINTER_2S_MIXER_DEFAULT_SENSOR1_GAIN` /
+`..._DEFAULT_SENSOR2_GAIN` (percent, 100 = unity).

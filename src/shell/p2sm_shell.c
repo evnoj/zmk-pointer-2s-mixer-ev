@@ -36,24 +36,31 @@ static __noinline char* ftoi(const float num) {
 
 static int cmd_sens(const struct shell *sh, const size_t argc, char **argv) {
     if (argc < 3) {
-        shprint(sh, "Usage: p2sm sens <pointer|twist> <get|set> [value]\n");
+        shprint(sh, "Usage: p2sm sens <pointer|twist|sensor1|sensor2> <get|set> [value]\n");
         return -EINVAL;
     }
 
     bool is_pointer = false;
+    int8_t sensor_idx = -1;
     if (strcmp(argv[1], "pointer") == 0) {
         is_pointer = true;
-    } else if (strcmp(argv[1], "twist") == 0) {} else {
-        shprint(sh, "Usage: p2sm sens <pointer|twist> <get|set> [value]\n");
+    } else if (strcmp(argv[1], "twist") == 0) {
+    } else if (strcmp(argv[1], "sensor1") == 0) {
+        sensor_idx = 0;
+    } else if (strcmp(argv[1], "sensor2") == 0) {
+        sensor_idx = 1;
+    } else {
+        shprint(sh, "Usage: p2sm sens <pointer|twist|sensor1|sensor2> <get|set> [value]\n");
         return -EINVAL;
     }
 
     if (strcmp(argv[2], "get") == 0) {
-        const float val = is_pointer ? p2sm_get_move_coef() : p2sm_get_twist_coef();
+        const float val = sensor_idx >= 0 ? p2sm_get_sensor_gain((uint8_t) sensor_idx)
+                                          : (is_pointer ? p2sm_get_move_coef() : p2sm_get_twist_coef());
         shprint(sh, "%d (%s)", (int) (val * 1000), ftoi(val));
     } else if (strcmp(argv[2], "set") == 0) {
         if (argc < 4) {
-            shprint(sh, "Usage: p2sm sens <pointer|twist> <get|set> [value]\n");
+            shprint(sh, "Usage: p2sm sens <pointer|twist|sensor1|sensor2> <get|set> [value]\n");
             return -EINVAL;
         }
 
@@ -64,17 +71,21 @@ static int cmd_sens(const struct shell *sh, const size_t argc, char **argv) {
             return -EINVAL;
         }
         const uint16_t parsed = (uint16_t)raw_parsed;
+        const float val_set = (float) parsed / 1000;
 
-        if (is_pointer) {
-            p2sm_set_move_coef((float) parsed / 1000);
+        if (sensor_idx >= 0) {
+            p2sm_set_sensor_gain((uint8_t) sensor_idx, val_set);
+        } else if (is_pointer) {
+            p2sm_set_move_coef(val_set);
         } else {
-            p2sm_set_twist_coef((float) parsed / 1000);
+            p2sm_set_twist_coef(val_set);
         }
 
-        const float val = is_pointer ? p2sm_get_move_coef() : p2sm_get_twist_coef();
+        const float val = sensor_idx >= 0 ? p2sm_get_sensor_gain((uint8_t) sensor_idx)
+                                          : (is_pointer ? p2sm_get_move_coef() : p2sm_get_twist_coef());
         shprint(sh, "Set: %d (%s)", (int) (val * 1000), ftoi(val));
     } else {
-        shprint(sh, "Usage: p2sm sens <pointer|twist> <get|set> [value]\n");
+        shprint(sh, "Usage: p2sm sens <pointer|twist|sensor1|sensor2> <get|set> [value]\n");
         return -EINVAL;
     }
 
