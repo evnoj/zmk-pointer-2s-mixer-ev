@@ -33,6 +33,12 @@ static uint32_t g_zrc_cache_last_refresh = 0;
 static bool     g_zrc_cache_initialized  = false;
 #endif
 
+/* twist inertia smoothing (experimental, off by default) */
+#define P2SM_TWIST_SMOOTH_EN_DEFAULT   0    /* enable velocity/inertia scroll smoothing */
+#define P2SM_TWIST_SMOOTH_TC_DEFAULT   150  /* ms; velocity smoothing time constant (higher = smoother/laggier) */
+#define P2SM_TWIST_COAST_TC_DEFAULT    400  /* ms; coast decay time constant during detection dropouts */
+#define P2SM_TWIST_COAST_MAX_DEFAULT   600  /* ms; force scroll to a stop after this long with no twist input */
+
 /* pointer path */
 static bool     g_zrc_frame_sync       = (bool)     IS_ENABLED(CONFIG_POINTER_2S_MIXER_FRAME_SYNC);
 static bool     g_zrc_scroll_dis_ptr   = (bool)     IS_ENABLED(CONFIG_POINTER_2S_MIXER_SCROLL_DISABLES_POINTER);
@@ -41,6 +47,7 @@ static uint32_t g_zrc_steady_thres     = (uint32_t) CONFIG_POINTER_2S_MIXER_STEA
 
 /* twist/scroll path */
 static bool     g_zrc_twist_global_en  = (bool)     IS_ENABLED(CONFIG_POINTER_2S_MIXER_TWIST_EN);
+static bool     g_zrc_dir_filter_en    = (bool)     IS_ENABLED(CONFIG_POINTER_2S_MIXER_DIRECTION_FILTER_EN);
 static uint32_t g_zrc_twist_ttl        = (uint32_t) CONFIG_POINTER_2S_MIXER_TWIST_FILTER_TTL;
 static bool     g_zrc_twist_hyst_en    = (bool)     IS_ENABLED(CONFIG_POINTER_2S_MIXER_TWIST_HYST_EN);
 static uint16_t g_zrc_twist_hyst_thres = (uint16_t) CONFIG_POINTER_2S_MIXER_TWIST_HYST_THRES;
@@ -57,6 +64,10 @@ static uint16_t g_zrc_fb_thres         = (uint16_t) CONFIG_POINTER_2S_MIXER_TWIS
 static uint32_t g_zrc_fb_max_cont      = (uint32_t) CONFIG_POINTER_2S_MIXER_FEEDBACK_MAX_CONTINUOUS;
 static int32_t  g_zrc_fb_cooldown      = (int32_t)  CONFIG_POINTER_2S_MIXER_FEEDBACK_COOLDOWN;
 static uint32_t g_zrc_fb_dur           = (uint32_t) CONFIG_POINTER_2S_MIXER_TWIST_FEEDBACK_DURATION;
+static bool     g_zrc_twist_smooth_en  = (bool)     P2SM_TWIST_SMOOTH_EN_DEFAULT;
+static uint16_t g_zrc_twist_smooth_tc  = (uint16_t) P2SM_TWIST_SMOOTH_TC_DEFAULT;
+static uint16_t g_zrc_twist_coast_tc   = (uint16_t) P2SM_TWIST_COAST_TC_DEFAULT;
+static uint16_t g_zrc_twist_coast_max  = (uint16_t) P2SM_TWIST_COAST_MAX_DEFAULT;
 
 #if IS_ENABLED(CONFIG_ZMK_RUNTIME_CONFIG)
 #define ZRC_REFRESH_YIELD()                                          \
@@ -78,6 +89,7 @@ static const struct zrc_cache_entry {
     { "p2sm/ptr_after_scroll", &g_zrc_ptr_after_scroll, sizeof(g_zrc_ptr_after_scroll) },
     { "p2sm/steady_thres",     &g_zrc_steady_thres,     sizeof(g_zrc_steady_thres)     },
     { "p2sm/twist_global_en",  &g_zrc_twist_global_en,  sizeof(g_zrc_twist_global_en)  },
+    { "p2sm/dir_filter_en",    &g_zrc_dir_filter_en,    sizeof(g_zrc_dir_filter_en)    },
     { "p2sm/twist_ttl",        &g_zrc_twist_ttl,        sizeof(g_zrc_twist_ttl)        },
     { "p2sm/twist_hyst_en",    &g_zrc_twist_hyst_en,    sizeof(g_zrc_twist_hyst_en)    },
     { "p2sm/twist_hyst_thres", &g_zrc_twist_hyst_thres, sizeof(g_zrc_twist_hyst_thres) },
@@ -94,6 +106,10 @@ static const struct zrc_cache_entry {
     { "p2sm/fb_max_cont",      &g_zrc_fb_max_cont,      sizeof(g_zrc_fb_max_cont)      },
     { "p2sm/fb_cooldown",      &g_zrc_fb_cooldown,      sizeof(g_zrc_fb_cooldown)      },
     { "p2sm/fb_dur",           &g_zrc_fb_dur,           sizeof(g_zrc_fb_dur)           },
+    { "p2sm/twist_smooth_en",  &g_zrc_twist_smooth_en,  sizeof(g_zrc_twist_smooth_en)  },
+    { "p2sm/twist_smooth_tc",  &g_zrc_twist_smooth_tc,  sizeof(g_zrc_twist_smooth_tc)  },
+    { "p2sm/twist_coast_tc",   &g_zrc_twist_coast_tc,   sizeof(g_zrc_twist_coast_tc)   },
+    { "p2sm/twist_coast_max",  &g_zrc_twist_coast_max,  sizeof(g_zrc_twist_coast_max)  },
 };
 #endif
 
@@ -182,6 +198,10 @@ struct zip_pointer_2s_mixer_data {
     float ema_delta_y, ema_translation;
     bool ema_initialized;
     bool sma_enabled;
+
+    // twist inertia smoothing
+    float twist_vel;                          // smoothed scroll velocity (wheel units / ms)
+    uint32_t last_twist_tick, last_twist_input;
 
     uint32_t last_sig_move;
 #if IS_ENABLED(CONFIG_POINTER_2S_MIXER_ENSURE_SYNC)
@@ -286,7 +306,14 @@ static int process_and_report(const struct device *dev) {
         dt = 0;
     }
 
-    if (g_zrc_scroll_dis_ptr && now - data->last_rpt_time_twist < g_zrc_ptr_after_scroll) {
+    // Suppress the pointer only while there is *real* twist input. In smoothing
+    // mode the scroll keeps coasting after you stop the ball; key off the last
+    // detected twist (not the last emitted tick) so you can move the pointer
+    // during the inertia tail.
+    const uint32_t since_twist = g_zrc_twist_smooth_en
+        ? (now - data->last_twist_input)
+        : (now - data->last_rpt_time_twist);
+    if (g_zrc_scroll_dis_ptr && since_twist < g_zrc_ptr_after_scroll) {
         data->last_rpt_time = now;
         data->rpt_x_remainder = 0;
         data->rpt_y_remainder = 0;
@@ -415,8 +442,7 @@ static float calculate_twist(const struct device *dev) {
     }
 
     const bool direction = s1_y < s2_y;
-#if IS_ENABLED(CONFIG_POINTER_2S_MIXER_DIRECTION_FILTER_EN)
-    if (data->last_twist_direction != direction) {
+    if (g_zrc_dir_filter_en && data->last_twist_direction != direction) {
         data->last_twist_direction = direction;
         data->last_twist = now;
         data->debounce_start = now;
@@ -424,7 +450,6 @@ static float calculate_twist(const struct device *dev) {
         LOG_DBG("Discarded twist (reason = direction_filter)");
         return 0;
     }
-#endif
 
     const float delta_y = (float) abs(direction ? s2_y - s1_y : s1_y - s2_y);
     const float translation = abs(s1_x + s2_x) + abs(s1_y + s2_y);
@@ -482,7 +507,7 @@ static float calculate_twist(const struct device *dev) {
     data->last_twist = now;
     data->last_twist_direction = direction;
 
-    if (IS_ENABLED(CONFIG_POINTER_2S_MIXER_DIRECTION_FILTER_EN) || g_zrc_feedback_en) {
+    if (g_zrc_dir_filter_en || g_zrc_feedback_en) {
         k_work_reschedule(&data->twist_filter_cleanup_work, K_MSEC(CONFIG_POINTER_2S_MIXER_DIRECTION_FILTER_TTL));
     }
 
@@ -497,10 +522,7 @@ static void twist_filter_cleanup_work_cb(struct k_work *work) {
     struct zip_pointer_2s_mixer_data *data = dev->data;
 
     data->twist_feedback_direction = -1;
-
-#if IS_ENABLED(CONFIG_POINTER_2S_MIXER_DIRECTION_FILTER_EN)
     data->last_twist_direction = -1;
-#endif
 
     LOG_DBG("Direction filter data discarded (timeout)");
 }
@@ -558,6 +580,50 @@ static void on_sensor_event(struct zip_pointer_2s_mixer_data *data, const uint8_
     *synced = true;
 }
 
+// Twist inertia smoothing. Instead of emitting scroll proportional to the noisy
+// per-tick twist value, maintain a heavily-smoothed scroll velocity and coast
+// through detection dropouts, so a free-spinning ball produces a continuous,
+// smoothly decaying scroll. Trades responsiveness and accuracy for smoothness.
+// Accumulates directly into rpt_twist_remainder; returns the current (signed)
+// velocity so the caller can derive feedback direction.
+static float twist_smooth_step(struct zip_pointer_2s_mixer_data *data, const float raw, const uint32_t now) {
+    uint32_t dt = now - data->last_twist_tick;
+    data->last_twist_tick = now;
+
+    if (dt > g_zrc_twist_coast_max) {
+        // Long gap since the last tick: treat this as the start of a new spin.
+        data->twist_vel = 0.0f;
+        data->rpt_twist_remainder = 0.0f;
+        dt = 1;
+    } else if (dt == 0) {
+        dt = 1;
+    } else if (dt > 64) {
+        dt = 64; // keep the per-ms rate math sane on sparse, slow frames
+    }
+
+    const float dtf = (float) dt;
+
+    if (raw != 0.0f) {
+        // Pull velocity toward the instantaneous rate. a = dt/(tc+dt) is the
+        // discrete one-pole low-pass coefficient; large tc => heavy smoothing.
+        const float inst_rate = raw / dtf;
+        const float a = dtf / ((float) g_zrc_twist_smooth_tc + dtf);
+        data->twist_vel += a * (inst_rate - data->twist_vel);
+        data->last_twist_input = now;
+    } else {
+        // No twist this tick (filtered/gated/gap): coast, decaying gently so a
+        // brief dropout doesn't stall the scroll, but a real stop still settles.
+        const float coast_tc = (float) g_zrc_twist_coast_tc;
+        data->twist_vel *= coast_tc / (coast_tc + dtf);
+        if (now - data->last_twist_input > g_zrc_twist_coast_max) {
+            data->twist_vel = 0.0f;
+        }
+    }
+
+    data->rpt_twist_remainder += data->twist_vel * dtf;
+    return data->twist_vel;
+}
+
 static int sy_handle_event(const struct device *dev, struct input_event *event, const uint32_t p1,
                            const uint32_t p2, struct zmk_input_processor_state *s) {
     const struct zip_pointer_2s_mixer_config *config = dev->config;
@@ -603,11 +669,16 @@ static int sy_handle_event(const struct device *dev, struct input_event *event, 
 
     const bool global_enabled = g_zrc_twist_global_en;
     if (data->twist_enabled && global_enabled && now - data->last_rpt_time_twist > config->sync_scroll_report_ms) {
-        const float twist_float = calculate_twist(dev) * data->twist_coef;
-        if (now - data->last_twist > CONFIG_POINTER_2S_MIXER_TWIST_REMAINDER_TTL) {
-            data->rpt_twist_remainder = twist_float;
-        } else {
-            data->rpt_twist_remainder += twist_float;
+        const float raw_twist = calculate_twist(dev) * data->twist_coef;
+        const float twist_float = g_zrc_twist_smooth_en
+            ? twist_smooth_step(data, raw_twist, now)
+            : raw_twist;
+        if (!g_zrc_twist_smooth_en) {
+            if (now - data->last_twist > CONFIG_POINTER_2S_MIXER_TWIST_REMAINDER_TTL) {
+                data->rpt_twist_remainder = raw_twist;
+            } else {
+                data->rpt_twist_remainder += raw_twist;
+            }
         }
 
         const int16_t twist_int = (int16_t) data->rpt_twist_remainder;
@@ -733,6 +804,10 @@ static int data_init(const struct device *dev) {
     data->ema_delta_y = 0.0f;
     data->ema_translation = 0.0f;
     data->ema_initialized = false;
+
+    data->twist_vel = 0.0f;
+    data->last_twist_tick = 0;
+    data->last_twist_input = 0;
 
     data->sma_enabled = false;
     data->sma_buffer = NULL;
@@ -1101,6 +1176,7 @@ static const struct zrc_param_def {
     { "p2sm/feedback_en",      IS_ENABLED(CONFIG_POINTER_2S_MIXER_FEEDBACK_EN), 0, 1 },
     { "p2sm/frame_sync",       IS_ENABLED(CONFIG_POINTER_2S_MIXER_FRAME_SYNC), 0, 1 },
     { "p2sm/twist_global_en",  IS_ENABLED(CONFIG_POINTER_2S_MIXER_TWIST_EN), 0, 1 },
+    { "p2sm/dir_filter_en",    IS_ENABLED(CONFIG_POINTER_2S_MIXER_DIRECTION_FILTER_EN), 0, 1 },
     { "p2sm/scroll_dis_ptr",   IS_ENABLED(CONFIG_POINTER_2S_MIXER_SCROLL_DISABLES_POINTER), 0, 1 },
     { "p2sm/ptr_after_scroll", CONFIG_POINTER_2S_MIXER_POINTER_AFTER_SCROLL_ACTIVATION, 0, 5000 },
     { "p2sm/twist_dy_mag_mul", CONFIG_POINTER_2S_MIXER_DELTA_Y_OVER_TRANS_MAG_MUL, 1, 100 },
@@ -1118,6 +1194,10 @@ static const struct zrc_param_def {
     { "p2sm/fb_dur",           CONFIG_POINTER_2S_MIXER_TWIST_FEEDBACK_DURATION, 0, 5000 },
     { "p2sm/steady_thres",     CONFIG_POINTER_2S_MIXER_STEADY_THRES, 0, 255 },
     { "p2sm/steady_cd",        CONFIG_POINTER_2S_MIXER_STEADY_COOLDOWN, 0, 5000 },
+    { "p2sm/twist_smooth_en",  P2SM_TWIST_SMOOTH_EN_DEFAULT, 0, 1 },
+    { "p2sm/twist_smooth_tc",  P2SM_TWIST_SMOOTH_TC_DEFAULT, 1, 2000 },
+    { "p2sm/twist_coast_tc",   P2SM_TWIST_COAST_TC_DEFAULT, 1, 5000 },
+    { "p2sm/twist_coast_max",  P2SM_TWIST_COAST_MAX_DEFAULT, 50, 5000 },
 };
 
 static int p2sm_register_runtime_params(void) {
