@@ -10,6 +10,9 @@ void p2sm_set_twist_coef(float coef);
 float p2sm_get_sensor_gain(uint8_t idx);
 void p2sm_set_sensor_gain(uint8_t idx, float gain);
 
+float p2sm_get_twist_sensor_gain(uint8_t idx);
+void p2sm_set_twist_sensor_gain(uint8_t idx, float gain);
+
 bool p2sm_twist_enabled();
 bool p2sm_twist_is_reversed();
 void p2sm_toggle_twist();

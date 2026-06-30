@@ -188,6 +188,23 @@ config POINTER_2S_MIXER_DEFAULT_SENSOR2_GAIN
     Per-sensor gain applied to sensor 2's contribution to the cursor (not scroll).
     See POINTER_2S_MIXER_DEFAULT_SENSOR1_GAIN.
 
+config POINTER_2S_MIXER_DEFAULT_TWIST_SENSOR1_GAIN
+  int "Default sensor 1 twist gain in %"
+  default 100
+  help
+    Per-sensor gain applied to sensor 1's contribution to the twist/scroll detector
+    (not the cursor). Independent of the pointer per-sensor gain. Use to rebalance
+    the twist detector when the two sensors track a given ball with different gain
+    (e.g. uneven clockwise vs counterclockwise scroll). 100 = unity. Runtime-
+    overridable and persisted via 'p2sm sens twist_sensor1'.
+
+config POINTER_2S_MIXER_DEFAULT_TWIST_SENSOR2_GAIN
+  int "Default sensor 2 twist gain in %"
+  default 100
+  help
+    Per-sensor gain applied to sensor 2's contribution to the twist/scroll detector.
+    See POINTER_2S_MIXER_DEFAULT_TWIST_SENSOR1_GAIN.
+
 config POINTER_2S_MIXER_SMA_WINDOW_SIZE_MAX
   int "SMA maximum window size (number of samples)"
   default 12

@@ -167,6 +167,7 @@ struct zip_pointer_2s_mixer_data {
     float rpt_x_remainder, rpt_y_remainder, rpt_twist_remainder;
     float move_coef, twist_coef;
     float sensor_gain[2]; // per-sensor pointer gain (cursor path only), default 1.0
+    float twist_gain[2];  // per-sensor twist gain (scroll/twist detector only), default 1.0
 
     struct p2sm_dataframe frame;
     float rotated_x[2], rotated_y[2];
@@ -265,8 +266,10 @@ static int process_and_report(const struct device *dev) {
             continue;
         }
 
-        *twist_x[s] += (int16_t) rx;
-        *twist_y[s] += (int16_t) ry;
+        float tx = rx, ty = ry;
+        apply_coef(data->twist_gain[s], &tx, &ty);
+        *twist_x[s] += (int16_t) tx;
+        *twist_y[s] += (int16_t) ty;
 
         apply_coef(data->sensor_gain[s], &rx, &ry);
         apply_coef(data->move_coef, &rx, &ry);
@@ -723,6 +726,8 @@ static int data_init(const struct device *dev) {
     data->twist_coef = (float) CONFIG_POINTER_2S_MIXER_DEFAULT_TWIST_COEF / 100;
     data->sensor_gain[0] = (float) CONFIG_POINTER_2S_MIXER_DEFAULT_SENSOR1_GAIN / 100;
     data->sensor_gain[1] = (float) CONFIG_POINTER_2S_MIXER_DEFAULT_SENSOR2_GAIN / 100;
+    data->twist_gain[0] = (float) CONFIG_POINTER_2S_MIXER_DEFAULT_TWIST_SENSOR1_GAIN / 100;
+    data->twist_gain[1] = (float) CONFIG_POINTER_2S_MIXER_DEFAULT_TWIST_SENSOR2_GAIN / 100;
     data->twist_enabled = true;
 
     data->ema_delta_y = 0.0f;
@@ -859,6 +864,7 @@ static void p2sm_save_work_cb(struct k_work *work) {
     p2sm_save_one("sma_en", &data->sma_enabled, sizeof(data->sma_enabled));
     p2sm_save_one("sma_win", &data->sma_window_size, sizeof(data->sma_window_size));
     p2sm_save_one("sensor_gain", data->sensor_gain, sizeof(data->sensor_gain));
+    p2sm_save_one("twist_gain", data->twist_gain, sizeof(data->twist_gain));
 }
 
 static void p2sm_save_config() {
@@ -914,6 +920,19 @@ void p2sm_set_sensor_gain(const uint8_t idx, const float gain) {
     struct zip_pointer_2s_mixer_data *data = p2sm_data();
     if (!data || idx > 1) return;
     data->sensor_gain[idx] = gain;
+    P2SM_PERSIST();
+}
+
+float p2sm_get_twist_sensor_gain(const uint8_t idx) {
+    const struct zip_pointer_2s_mixer_data *data = p2sm_data();
+    if (!data || idx > 1) return 0;
+    return data->twist_gain[idx];
+}
+
+void p2sm_set_twist_sensor_gain(const uint8_t idx, const float gain) {
+    struct zip_pointer_2s_mixer_data *data = p2sm_data();
+    if (!data || idx > 1) return;
+    data->twist_gain[idx] = gain;
     P2SM_PERSIST();
 }
 
@@ -1028,6 +1047,22 @@ static int p2sm_settings_load_cb(const char *name, size_t len, settings_read_cb 
             }
         } else {
             LOG_ERR("Failed to load sensor_gain");
+        }
+
+        return 0;
+    }
+
+    if (settings_name_steq(name, "twist_gain", NULL)) {
+        float gains[2] = { 1.0f, 1.0f };
+        const int rd = read_cb(cb_arg, gains, sizeof(gains));
+        if (rd == sizeof(gains)) {
+            if (g_dev != NULL) {
+                struct zip_pointer_2s_mixer_data *data = g_dev->data;
+                data->twist_gain[0] = gains[0];
+                data->twist_gain[1] = gains[1];
+            }
+        } else {
+            LOG_ERR("Failed to load twist_gain");
         }
 
         return 0;
